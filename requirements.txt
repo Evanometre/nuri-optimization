@@ -1,0 +1,6 @@
+numpy
+scipy
+pandas
+ortools
+pytest
+streamlit
