@@ -72,6 +72,107 @@ def solve_simplex(c, A, b, max_iterations=1000):
     return None, None, "max_iterations_exceeded"
 
 
+def solve_simplex_general(c, constraints, max_iterations=1000, big_m=1e7):
+    """Big-M method: handles '<=', '>=', and '=' constraints (still x >= 0).
+
+    constraints: list of (row, relation, rhs) with relation in {"<=", ">=", "="}.
+    rhs may be negative -- it's normalized (row/rhs negated, relation flipped)
+    so every artificial-variable row starts with a non-negative RHS.
+
+    This is what unlocks branch-and-bound's ">=" branches (x_i >= ceil(v)),
+    which the plain <=-only solve_simplex() above can't express.
+    """
+    c = np.asarray(c, dtype=float)
+    n = len(c)
+    m = len(constraints)
+
+    norm = []
+    for row, relation, rhs in constraints:
+        row = list(row)
+        if rhs < 0:
+            row = [-v for v in row]
+            rhs = -rhs
+            relation = {"<=": ">=", ">=": "<=", "=": "="}[relation]
+        norm.append((row, relation, rhs))
+
+    n_slack_surplus = sum(1 for _, rel, _ in norm if rel in ("<=", ">="))
+    n_artificial = sum(1 for _, rel, _ in norm if rel in (">=", "="))
+    total_cols = n + n_slack_surplus + n_artificial
+
+    T = np.zeros((m + 1, total_cols + 1))
+    basis = [None] * m
+
+    slack_idx = n
+    artificial_idx = n + n_slack_surplus
+    artificial_rows = []
+
+    for i, (row, relation, rhs) in enumerate(norm):
+        T[i, :n] = row
+        T[i, -1] = rhs
+        if relation == "<=":
+            T[i, slack_idx] = 1
+            basis[i] = slack_idx
+            slack_idx += 1
+        elif relation == ">=":
+            T[i, slack_idx] = -1
+            slack_idx += 1
+            T[i, artificial_idx] = 1
+            basis[i] = artificial_idx
+            artificial_rows.append(i)
+            artificial_idx += 1
+        else:  # "="
+            T[i, artificial_idx] = 1
+            basis[i] = artificial_idx
+            artificial_rows.append(i)
+            artificial_idx += 1
+
+    # Objective: maximize c^Tx - M*sum(artificials) -> bottom row entry -c_j
+    # for structural vars, 0 for slack/surplus, +M for artificials -- then
+    # canonicalize by zeroing out the (currently basic) artificial columns.
+    T[-1, :n] = -c
+    T[-1, n + n_slack_surplus:total_cols] = big_m
+    for i in artificial_rows:
+        T[-1, :] -= big_m * T[i, :]
+
+    for _ in range(max_iterations):
+        obj_row = T[-1, :-1]
+        candidates = np.where(obj_row < -1e-7)[0]
+        if len(candidates) == 0:
+            break
+        pivot_col = candidates[0]
+
+        col = T[:m, pivot_col]
+        rhs = T[:m, -1]
+        ratios = np.where(col > 1e-9, np.divide(rhs, col, out=np.full(m, np.inf), where=col > 1e-9), np.inf)
+
+        if np.all(np.isinf(ratios)):
+            return None, None, "unbounded"
+
+        min_ratio = ratios.min()
+        tied_rows = np.where(np.abs(ratios - min_ratio) < 1e-9)[0]
+        pivot_row = min(tied_rows, key=lambda r: basis[r])
+
+        pivot_val = T[pivot_row, pivot_col]
+        T[pivot_row, :] /= pivot_val
+        for r in range(m + 1):
+            if r != pivot_row:
+                T[r, :] -= T[r, pivot_col] * T[pivot_row, :]
+        basis[pivot_row] = pivot_col
+    else:
+        return None, None, "max_iterations_exceeded"
+
+    x = np.zeros(total_cols)
+    for row, var in enumerate(basis):
+        x[var] = T[row, -1]
+
+    # Any artificial variable still positive in the basis means the original
+    # (non-relaxed) feasible region is empty.
+    if np.any(x[n + n_slack_surplus:total_cols] > 1e-6):
+        return None, None, "infeasible"
+
+    return x[:n], float(np.dot(c, x[:n])), "optimal"
+
+
 def solve_simplex_for_problem(problem):
     """Adapt a nuri.models.ProductMixProblem into standard form and solve it.
 
