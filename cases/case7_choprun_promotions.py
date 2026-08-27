@@ -119,3 +119,49 @@ def choprun_experiment(seed=7):
         customers=customers,
         holdout_customers=holdout_customers,
     )
+
+
+def _summarize(customers, factor_names):
+    combo_indices = {}
+    for i, c in enumerate(customers):
+        key = tuple(c[f] for f in factor_names)
+        combo_indices.setdefault(key, []).append(i)
+
+    summaries = []
+    for key, idx in combo_indices.items():
+        vals = np.array([customers[i]["contribution"] for i in idx])
+        summaries.append(
+            {
+                "combo": dict(zip(factor_names, key)),
+                "n": len(idx),
+                "mean": float(vals.mean()),
+                "std": float(vals.std(ddof=1)),
+            }
+        )
+    return summaries
+
+
+def default_cell_summaries():
+    """Pre-aggregated per-cell (n, mean, std) for the 8 primary combinations
+    -- the realistic input size for a mobile UI, computed once from the
+    synthetic customer-level data so the app doesn't need to hold 48,000 rows.
+    """
+    experiment = choprun_experiment()
+    return _summarize(experiment.customers, FACTOR_NAMES)
+
+
+def default_holdout_summary():
+    experiment = choprun_experiment()
+    return _summarize(experiment.holdout_customers, FACTOR_NAMES)[0]
+
+
+def default_segment_cell_summaries():
+    """{"high_value": [8 cell summaries], "regular": [8 cell summaries]} --
+    the input shape needed to test whether an effect differs by segment
+    from summary stats alone."""
+    experiment = choprun_experiment()
+    by_segment = {}
+    for seg in ("high_value", "regular"):
+        subset = [c for c in experiment.customers if c["segment"] == seg]
+        by_segment[seg] = _summarize(subset, FACTOR_NAMES)
+    return by_segment

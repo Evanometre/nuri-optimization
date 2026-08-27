@@ -111,6 +111,7 @@ def analyze_fractional(experiment, alpha=0.05):
         p_value = stats.f.sf(f_stat, 1, df_pure)
         effect_results[eff] = {
             "effect": effect_estimates[eff],
+            "se": 2 * np.sqrt(mse_pure / n),
             "ss": ss,
             "f": f_stat,
             "p": p_value,
@@ -121,6 +122,85 @@ def analyze_fractional(experiment, alpha=0.05):
 
     combo_means = {key: contributions[np.array(idx)].mean() for key, idx in combo_indices.items()}
     combo_ns = {key: len(idx) for key, idx in combo_indices.items()}
+
+    return {
+        "intercept": intercept,
+        "effects": effect_results,
+        "mse_pure": mse_pure,
+        "df_pure": df_pure,
+        "combo_means": combo_means,
+        "combo_ns": combo_ns,
+        "factor_names": factor_names,
+        "independent_factors": independent_factors,
+        "generated_factor": generated_factor,
+    }
+
+
+def analyze_fractional_from_summary(factor_names, generator, cell_summaries, alpha=0.05):
+    """Same analysis, from per-cell SUMMARY statistics (n, mean, std) instead
+    of raw per-customer rows -- what a marketer would actually have from an
+    analytics dashboard, and what a mobile UI can realistically accept as
+    input (entering 48,000 rows by hand isn't practical).
+
+    cell_summaries: list of {"combo": {"A": -1, ...}, "n": int, "mean": float,
+    "std": float} -- one entry per treatment cell (std = sample std of the
+    per-customer outcome within that cell).
+
+    Uses weighted least squares (weight = n_i, i.e. inverse-variance
+    weighting given a common per-customer variance) since unequal cell sizes
+    break the simple equal-weight contrast shortcut used in analyze_fractional.
+    """
+    generated_factor = generator["generated_factor"]
+    independent_factors = generator["from"]
+
+    effects = list(independent_factors) + [generated_factor]
+    for a, b in itertools.combinations(independent_factors, 2):
+        effects.append(a + b)
+
+    n_cells = len(cell_summaries)
+    X = np.ones((n_cells, len(effects) + 1))
+    for j, eff in enumerate(effects):
+        X[:, j + 1] = [_coded_column(eff, cs["combo"]) for cs in cell_summaries]
+
+    y = np.array([cs["mean"] for cs in cell_summaries])
+    w = np.array([cs["n"] for cs in cell_summaries], dtype=float)
+    W = np.diag(w)
+
+    XtWX = X.T @ W @ X
+    XtWy = X.T @ W @ y
+    beta = np.linalg.solve(XtWX, XtWy)
+    intercept = beta[0]
+    effect_estimates = {eff: 2 * beta[j + 1] for j, eff in enumerate(effects)}
+
+    total_n = sum(cs["n"] for cs in cell_summaries)
+    sse_pure = sum((cs["n"] - 1) * cs["std"] ** 2 for cs in cell_summaries)
+    df_pure = total_n - n_cells
+    mse_pure = sse_pure / df_pure
+
+    XtWX_inv = np.linalg.inv(XtWX)
+
+    n_effects = len(effects)
+    alpha_bonferroni = alpha / n_effects
+    aliases = alias_map(independent_factors, generated_factor)
+
+    effect_results = {}
+    for j, eff in enumerate(effects):
+        var_beta_j = mse_pure * XtWX_inv[j + 1, j + 1]
+        var_effect_j = 4 * var_beta_j
+        f_stat = (effect_estimates[eff] ** 2) / var_effect_j
+        p_value = stats.f.sf(f_stat, 1, df_pure)
+        effect_results[eff] = {
+            "effect": effect_estimates[eff],
+            "se": np.sqrt(var_effect_j),
+            "f": f_stat,
+            "p": p_value,
+            "significant": p_value < alpha,
+            "significant_bonferroni": p_value < alpha_bonferroni,
+            "aliased_with": aliases.get(eff),
+        }
+
+    combo_means = {tuple(cs["combo"][f] for f in factor_names): cs["mean"] for cs in cell_summaries}
+    combo_ns = {tuple(cs["combo"][f] for f in factor_names): cs["n"] for cs in cell_summaries}
 
     return {
         "intercept": intercept,
@@ -180,10 +260,73 @@ def holdout_validation(analysis, holdout_customers, alpha=0.05):
     }
 
 
+def holdout_validation_from_summary(analysis, holdout_summary, alpha=0.05):
+    """Same check as holdout_validation, from a single cell's (n, mean, std)
+    summary instead of raw customer rows -- what the mobile UI has to work
+    with. Uses a one-sample t-test on the summary stats directly."""
+    combo = holdout_summary["combo"]
+    _, _, predict = fit_reduced_model(analysis)
+    predicted = predict(combo)
+
+    n = holdout_summary["n"]
+    mean = holdout_summary["mean"]
+    se = holdout_summary["std"] / np.sqrt(n)
+    t_stat = (mean - predicted) / se
+    p_value = 2 * stats.t.sf(abs(t_stat), df=n - 1)
+
+    return {
+        "combo": combo,
+        "predicted": predicted,
+        "observed_mean": mean,
+        "observed_se": se,
+        "p_value": p_value,
+        "supports_recommendation": p_value >= alpha,
+    }
+
+
+def segment_effect_difference_from_summary(
+    factor, factor_names, generator, segment_cell_summaries, alpha=0.05
+):
+    """Does `factor`'s effect differ between two segments, given each
+    segment's own set of 8 per-cell (n, mean, std) summaries -- what the
+    mobile UI has to work with instead of raw customer rows.
+
+    segment_cell_summaries: {segment_name: [cell_summary, ...]}, exactly 2 keys.
+    """
+    if len(segment_cell_summaries) != 2:
+        raise ValueError("segment_effect_difference_from_summary needs exactly 2 segments")
+
+    per_segment = {}
+    for seg, summaries in segment_cell_summaries.items():
+        analysis = analyze_fractional_from_summary(factor_names, generator, summaries, alpha=alpha)
+        per_segment[seg] = {
+            "effect": analysis["effects"][factor]["effect"],
+            "se": analysis["effects"][factor]["se"],
+        }
+
+    (seg1, r1), (seg2, r2) = per_segment.items()
+    diff = r1["effect"] - r2["effect"]
+    se_diff = np.sqrt(r1["se"] ** 2 + r2["se"] ** 2)
+    z = diff / se_diff
+    p_value = 2 * stats.norm.sf(abs(z))
+
+    return {
+        "factor": factor,
+        "by_segment": per_segment,
+        "difference": diff,
+        "z": z,
+        "p_value": p_value,
+        "significantly_different": p_value < alpha,
+    }
+
+
 def segment_effect_difference(experiment, factor, segment_key, alpha=0.05):
     """Does `factor`'s effect on contribution differ between segment values?
-    Splits the primary-fraction customers by segment, estimates the factor's
-    contrast effect separately in each, and tests the difference.
+    Splits the primary-fraction customers by segment and refits the FULL
+    7-effect model separately in each (not just a 1-factor regression) --
+    same methodology as segment_effect_difference_from_summary, so both
+    entry points agree exactly rather than giving two different answers to
+    the same question.
     """
     customers = experiment.customers
     segments = sorted({c[segment_key] for c in customers})
@@ -192,30 +335,18 @@ def segment_effect_difference(experiment, factor, segment_key, alpha=0.05):
 
     results = {}
     for seg in segments:
-        subset = [c for c in customers if c[segment_key] == seg]
-        contributions = np.array([c["contribution"] for c in subset])
-        coded = np.array([_coded_column(factor, c) for c in subset])
-        n = len(subset)
-
-        # Effect = 2 * (mean at +1 minus overall mean scaled) -- equivalently
-        # 2x the OLS coefficient on the coded column, same shortcut as above.
-        X = np.column_stack([np.ones(n), coded])
-        beta, *_ = np.linalg.lstsq(X, contributions, rcond=None)
-        effect = 2 * beta[1]
-
-        combo_indices = {}
-        for i, c in enumerate(subset):
-            key = tuple(c[f] for f in experiment.factor_names)
-            combo_indices.setdefault(key, []).append(i)
-        sse = sum(
-            np.sum((contributions[np.array(idx)] - contributions[np.array(idx)].mean()) ** 2)
-            for idx in combo_indices.values()
+        subset_experiment = FractionalFactorialExperiment(
+            factor_names=experiment.factor_names,
+            factor_labels=experiment.factor_labels,
+            generator=experiment.generator,
+            customers=[c for c in customers if c[segment_key] == seg],
         )
-        df = n - len(combo_indices)
-        mse = sse / df
-        se_effect = 2 * np.sqrt(mse / n)  # effect = 2*coef, Var(coef) approx mse/n for a +-1 column
-
-        results[seg] = {"effect": effect, "se": se_effect, "n": n}
+        seg_analysis = analyze_fractional(subset_experiment, alpha=alpha)
+        results[seg] = {
+            "effect": seg_analysis["effects"][factor]["effect"],
+            "se": seg_analysis["effects"][factor]["se"],
+            "n": len(subset_experiment.customers),
+        }
 
     (seg1, r1), (seg2, r2) = results.items()
     diff = r1["effect"] - r2["effect"]

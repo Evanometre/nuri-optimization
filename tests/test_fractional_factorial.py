@@ -1,12 +1,15 @@
+import numpy as np
 import pytest
 
-from cases.case7_choprun_promotions import choprun_experiment
+from cases.case7_choprun_promotions import choprun_experiment, default_segment_cell_summaries
 from nuri.statistics.fractional_factorial import (
     analyze_fractional,
+    analyze_fractional_from_summary,
     best_combination,
     fit_reduced_model,
     holdout_validation,
     segment_effect_difference,
+    segment_effect_difference_from_summary,
 )
 
 
@@ -75,6 +78,48 @@ def test_message_effect_differs_sharply_by_segment(experiment):
     result = segment_effect_difference(experiment, "D", "segment")
     assert result["significantly_different"]
     assert result["by_segment"]["high_value"]["effect"] > result["by_segment"]["regular"]["effect"]
+
+
+def test_summary_stats_engine_matches_raw_data_engine_exactly(experiment, analysis):
+    # The mobile UI can't accept 48,000 raw rows -- it accepts per-cell
+    # summary stats (n, mean, std) instead. That path must reproduce the
+    # raw-data results exactly, not approximately.
+    combo_indices = {}
+    for i, c in enumerate(experiment.customers):
+        key = tuple(c[f] for f in experiment.factor_names)
+        combo_indices.setdefault(key, []).append(i)
+
+    contributions = np.array([c["contribution"] for c in experiment.customers])
+    cell_summaries = [
+        {
+            "combo": dict(zip(experiment.factor_names, key)),
+            "n": len(idx),
+            "mean": contributions[np.array(idx)].mean(),
+            "std": contributions[np.array(idx)].std(ddof=1),
+        }
+        for key, idx in combo_indices.items()
+    ]
+
+    summary_analysis = analyze_fractional_from_summary(
+        experiment.factor_names, experiment.generator, cell_summaries
+    )
+
+    for eff in analysis["effects"]:
+        assert summary_analysis["effects"][eff]["effect"] == pytest.approx(
+            analysis["effects"][eff]["effect"], rel=1e-6
+        )
+        assert summary_analysis["effects"][eff]["p"] == pytest.approx(
+            analysis["effects"][eff]["p"], abs=1e-6
+        )
+
+
+def test_segment_summary_engine_matches_raw_data_engine(experiment):
+    raw = segment_effect_difference(experiment, "D", "segment")
+    summary = segment_effect_difference_from_summary(
+        "D", experiment.factor_names, experiment.generator, default_segment_cell_summaries()
+    )
+    assert summary["difference"] == pytest.approx(raw["difference"], rel=1e-6)
+    assert summary["p_value"] == pytest.approx(raw["p_value"], rel=1e-3)
 
 
 def test_other_factors_do_not_differ_by_segment(experiment):

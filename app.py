@@ -14,6 +14,13 @@ from nuri.statistics.factorial_design import (
     confirmation_test,
     describe_combo,
 )
+from nuri.statistics.fractional_factorial import (
+    analyze_fractional_from_summary,
+    best_combination as best_combination_fractional,
+    fit_reduced_model as fit_reduced_model_fractional,
+    holdout_validation_from_summary,
+    segment_effect_difference_from_summary,
+)
 from cases.furniture import PRODUCTS as FURNITURE_PRODUCTS, RESOURCES as FURNITURE_RESOURCES
 from cases.case2_generic import PRODUCTS as CASE2_PRODUCTS, RESOURCES as CASE2_RESOURCES
 from cases.case3_generic import PRODUCTS as CASE3_PRODUCTS, RESOURCES as CASE3_RESOURCES
@@ -35,6 +42,16 @@ from cases.case6_packaging_defects import (
     CURRENT_DEFECT_RATE as DOE_CURRENT_DEFECT_RATE,
     MONTHLY_VOLUME as DOE_MONTHLY_VOLUME,
     COST_PER_DEFECT as DOE_COST_PER_DEFECT,
+)
+from cases.case7_choprun_promotions import (
+    FACTOR_NAMES as FF_FACTOR_NAMES,
+    FACTOR_LABELS as FF_FACTOR_LABELS,
+    INDEPENDENT_FACTORS as FF_INDEPENDENT_FACTORS,
+    GENERATED_FACTOR as FF_GENERATED_FACTOR,
+    GENERATOR as FF_GENERATOR,
+    default_cell_summaries,
+    default_holdout_summary,
+    default_segment_cell_summaries,
 )
 
 st.set_page_config(page_title="Nuri — Optimization Engine", layout="centered")
@@ -542,10 +559,181 @@ def run_doe_app():
                 )
 
 
+def cell_summaries_to_df(cell_summaries, factor_names):
+    rows = []
+    for cs in cell_summaries:
+        row = {f: cs["combo"][f] for f in factor_names}
+        row.update({"n": cs["n"], "mean": cs["mean"], "std": cs["std"]})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def df_to_cell_summaries(df, factor_names):
+    summaries = []
+    for _, row in df.iterrows():
+        combo = {f: int(row[f]) for f in factor_names}
+        summaries.append(
+            {"combo": combo, "n": int(row["n"]), "mean": float(row["mean"]), "std": float(row["std"])}
+        )
+    return summaries
+
+
+def locked_factor_column_config(factor_names):
+    return {f: st.column_config.NumberColumn(f, disabled=True) for f in factor_names}
+
+
+def run_fractional_factorial_app():
+    st.caption(
+        "Fractional factorial (half-fraction) experiment: only 8 of the 16 possible "
+        "combinations are actually run, chosen so every main effect stays estimable. "
+        "The design itself (which combinations, and the aliasing that results) is fixed "
+        "for this case -- enter the outcome summary stats (n, mean, std) from your "
+        "experiment's results for each cell."
+    )
+    st.caption(
+        f"Design: {FF_GENERATED_FACTOR} = {'*'.join(FF_INDEPENDENT_FACTORS)} (generator). "
+        "Factor columns below are locked to the design; only n/mean/std are editable."
+    )
+
+    if "ff_cells_df" not in st.session_state:
+        st.session_state["ff_cells_df"] = cell_summaries_to_df(default_cell_summaries(), FF_FACTOR_NAMES)
+        holdout = default_holdout_summary()
+        st.session_state["ff_holdout_df"] = cell_summaries_to_df([holdout], FF_FACTOR_NAMES)
+        seg_summaries = default_segment_cell_summaries()
+        seg_rows = []
+        for seg, summaries in seg_summaries.items():
+            df = cell_summaries_to_df(summaries, FF_FACTOR_NAMES)
+            df.insert(0, "segment", seg)
+            seg_rows.append(df)
+        st.session_state["ff_segment_df"] = pd.concat(seg_rows, ignore_index=True)
+
+    st.subheader("Factor labels")
+    st.dataframe(
+        pd.DataFrame(
+            [{"factor": f, "low (-1)": lo, "high (+1)": hi} for f, (lo, hi) in FF_FACTOR_LABELS.items()]
+        ),
+        hide_index=True,
+    )
+
+    st.subheader("Primary experiment cells (8)")
+    cells_df = st.data_editor(
+        st.session_state["ff_cells_df"],
+        num_rows="fixed",
+        key="ff_cells_editor",
+        column_config=locked_factor_column_config(FF_FACTOR_NAMES),
+    )
+    st.session_state["ff_cells_df"] = cells_df
+
+    alpha = st.number_input("Significance level (alpha)", min_value=0.001, max_value=0.5, value=0.05, step=0.01, key="ff_alpha")
+
+    with st.expander("Held-out combination (optional, for validation)"):
+        holdout_df = st.data_editor(
+            st.session_state["ff_holdout_df"],
+            num_rows="fixed",
+            key="ff_holdout_editor",
+            column_config=locked_factor_column_config(FF_FACTOR_NAMES),
+        )
+        st.session_state["ff_holdout_df"] = holdout_df
+
+    with st.expander("Segment breakdown (optional, tests whether an effect differs by segment)"):
+        st.caption("16 rows: the same 8 cells, broken out separately for two customer segments.")
+        segment_df = st.data_editor(
+            st.session_state["ff_segment_df"],
+            num_rows="fixed",
+            key="ff_segment_editor",
+            column_config=locked_factor_column_config(FF_FACTOR_NAMES),
+        )
+        st.session_state["ff_segment_df"] = segment_df
+        segment_factor_to_test = st.selectbox("Test which factor for segment differences?", FF_FACTOR_NAMES, index=len(FF_FACTOR_NAMES) - 1)
+
+    if st.button("Analyze experiment", type="primary"):
+        cell_summaries = df_to_cell_summaries(cells_df, FF_FACTOR_NAMES)
+        analysis = analyze_fractional_from_summary(FF_FACTOR_NAMES, FF_GENERATOR, cell_summaries, alpha=alpha)
+
+        st.subheader("Effect significance")
+        st.caption(f"{len(analysis['effects'])} estimable contrasts (aliasing shown for the 3 two-way pairs).")
+        effects_df = pd.DataFrame(
+            [
+                {
+                    "effect": eff,
+                    "aliased with": r["aliased_with"],
+                    "estimate": r["effect"],
+                    "F": r["f"],
+                    "p": r["p"],
+                    "significant (p<alpha)": r["significant"],
+                    "survives Bonferroni": r["significant_bonferroni"],
+                }
+                for eff, r in sorted(analysis["effects"].items(), key=lambda kv: kv[1]["p"])
+            ]
+        )
+        st.dataframe(
+            effects_df.style.format({"estimate": "{:+.2f}", "F": "{:.2f}", "p": "{:.5f}"}),
+            hide_index=True,
+        )
+
+        best_run, best_val = best_combination_fractional(analysis)
+        significant, predictions, predict = fit_reduced_model_fractional(analysis, use_bonferroni=True)
+        model_pred = predict(best_run)
+
+        st.subheader("Recommended combination")
+        readable = describe_combo(best_run, FF_FACTOR_LABELS)
+        st.dataframe(pd.DataFrame([{"factor": k, "setting": v} for k, v in readable.items()]), hide_index=True)
+        c1, c2 = st.columns(2)
+        c1.metric("Best observed mean contribution", f"{best_val:,.2f}")
+        c2.metric("Reduced-model prediction", f"{model_pred:,.2f}")
+        st.caption(f"Bonferroni-significant effects used: {significant or 'none'}")
+
+        holdout_summaries = df_to_cell_summaries(holdout_df, FF_FACTOR_NAMES)
+        if holdout_summaries and holdout_summaries[0]["n"] > 0:
+            st.subheader("Holdout validation")
+            hv = holdout_validation_from_summary(analysis, holdout_summaries[0], alpha=alpha)
+            c1, c2 = st.columns(2)
+            c1.metric("Predicted", f"{hv['predicted']:,.2f}")
+            c2.metric("Observed", f"{hv['observed_mean']:,.2f}")
+            st.caption(f"p={hv['p_value']:.4f}")
+            if hv["supports_recommendation"]:
+                st.success("The held-out combination is statistically consistent with the model's prediction.")
+            else:
+                st.warning("The held-out combination's observed value differs significantly from the prediction.")
+
+        segment_rows = [
+            {**{f: int(row[f]) for f in FF_FACTOR_NAMES}, "n": int(row["n"]), "mean": float(row["mean"]), "std": float(row["std"]), "segment": row["segment"]}
+            for _, row in segment_df.iterrows()
+        ]
+        segments_present = sorted({r["segment"] for r in segment_rows if r["n"] > 0})
+        if len(segments_present) == 2:
+            st.subheader(f"Segment heterogeneity: does {segment_factor_to_test} differ by segment?")
+            by_segment = {
+                seg: [
+                    {"combo": {f: r[f] for f in FF_FACTOR_NAMES}, "n": r["n"], "mean": r["mean"], "std": r["std"]}
+                    for r in segment_rows if r["segment"] == seg
+                ]
+                for seg in segments_present
+            }
+            seg_result = segment_effect_difference_from_summary(
+                segment_factor_to_test, FF_FACTOR_NAMES, FF_GENERATOR, by_segment, alpha=alpha
+            )
+            seg_df = pd.DataFrame(
+                [{"segment": seg, "effect": r["effect"], "se": r["se"]} for seg, r in seg_result["by_segment"].items()]
+            )
+            st.dataframe(seg_df.style.format({"effect": "{:+.2f}", "se": "{:.2f}"}), hide_index=True)
+            st.caption(f"Difference={seg_result['difference']:+.2f}, p={seg_result['p_value']:.5f}")
+            if seg_result["significantly_different"]:
+                st.info(f"{segment_factor_to_test}'s effect genuinely differs by segment — consider targeting it selectively rather than deploying it uniformly.")
+            else:
+                st.info(f"{segment_factor_to_test}'s effect is consistent across these two segments — safe to deploy the same way for both.")
+
+
 st.title("Nuri — Optimization Engine")
 
 problem_type = st.selectbox(
-    "Problem type", ["Product mix (LP/ILP)", "Workforce scheduling", "Factorial DOE (statistics)"]
+    "Problem type",
+    [
+        "Product mix (LP/ILP)",
+        "Workforce scheduling",
+        "Factorial DOE (statistics)",
+        "Fractional factorial DOE (statistics)",
+    ],
 )
 
 st.divider()
@@ -554,5 +742,7 @@ if problem_type == "Product mix (LP/ILP)":
     run_product_mix_app()
 elif problem_type == "Workforce scheduling":
     run_scheduling_app()
-else:
+elif problem_type == "Factorial DOE (statistics)":
     run_doe_app()
+else:
+    run_fractional_factorial_app()
