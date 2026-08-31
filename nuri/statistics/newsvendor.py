@@ -115,6 +115,25 @@ class ProductionRecommendation:
 
         return result
 
+    def explain_calculation(self):
+        """The core calculation chain, spelled out explicitly rather than
+        buried in the result dict:
+          September demand distribution -> critical-ratio percentile = X
+          -> X - starting inventory = production
+        """
+        available_stock_star, z, cr = self.unconstrained_optimum()
+        production_unconstrained = available_stock_star - self.starting_inventory
+        return (
+            f"Demand distribution: Normal(mu={self.mu:,.0f}, sigma={self.sigma:,.0f})\n"
+            f"Critical ratio = Cu/(Cu+Co) = {self.underage_cost:g}/({self.underage_cost:g}+{self.overage_cost:g}) "
+            f"= {cr:.4f} ({cr:.2%})\n"
+            f"-> z = {z:.4f} standard deviations (norm.ppf({cr:.4f}))\n"
+            f"-> {cr:.2%} percentile of demand = mu + z*sigma = "
+            f"{self.mu:,.0f} + {z:.4f} x {self.sigma:,.0f} = {available_stock_star:,.0f}\n"
+            f"-> Production = {available_stock_star:,.0f} (percentile) - {self.starting_inventory:,.0f} "
+            f"(starting inventory) = {production_unconstrained:,.0f}"
+        )
+
     def evaluate(self, production):
         """Expected-cost breakdown for a specific candidate production
         quantity, for comparing against the recommendation."""

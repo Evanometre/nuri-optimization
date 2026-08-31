@@ -21,6 +21,8 @@ from nuri.statistics.fractional_factorial import (
     holdout_validation_from_summary,
     segment_effect_difference_from_summary,
 )
+from nuri.statistics.timeseries_forecast import fit_trend_seasonal, forecast, press_rmse, seasonal_effects, trend_per_period
+from nuri.statistics.newsvendor import ProductionRecommendation
 from cases.furniture import PRODUCTS as FURNITURE_PRODUCTS, RESOURCES as FURNITURE_RESOURCES
 from cases.case2_generic import PRODUCTS as CASE2_PRODUCTS, RESOURCES as CASE2_RESOURCES
 from cases.case3_generic import PRODUCTS as CASE3_PRODUCTS, RESOURCES as CASE3_RESOURCES
@@ -52,6 +54,18 @@ from cases.case7_choprun_promotions import (
     default_cell_summaries,
     default_holdout_summary,
     default_segment_cell_summaries,
+)
+from cases.case8_primesack_production import (
+    historical_series as PS_historical_series,
+    SEPTEMBER_MONTH_INDEX as PS_TARGET_MONTH_INDEX,
+    SEPTEMBER_CALENDAR_MONTH as PS_TARGET_SEASON,
+    STARTING_INVENTORY as PS_STARTING_INVENTORY,
+    NORMAL_CAPACITY as PS_NORMAL_CAPACITY,
+    OVERTIME_CAPACITY as PS_OVERTIME_CAPACITY,
+    OVERTIME_EXTRA_COST_PER_SACK as PS_OVERTIME_EXTRA_COST,
+    STOCKOUT_COST_PER_SACK as PS_STOCKOUT_COST,
+    HOLDING_COST_PER_SACK_PER_MONTH as PS_HOLDING_COST,
+    MAX_ENDING_INVENTORY as PS_MAX_ENDING_INVENTORY,
 )
 
 st.set_page_config(page_title="Nuri — Optimization Engine", layout="centered")
@@ -724,6 +738,111 @@ def run_fractional_factorial_app():
                 st.info(f"{segment_factor_to_test}'s effect is consistent across these two segments — safe to deploy the same way for both.")
 
 
+def demand_history_to_df(month_indices, seasons, values):
+    return pd.DataFrame({"month_index": month_indices, "calendar_month": seasons, "demand": values})
+
+
+def run_production_planning_app():
+    st.caption(
+        "Forecast next month's demand from historical data (trend + seasonality), then find the "
+        "production quantity that best balances stockout risk against excess inventory -- not "
+        "just 'produce to the forecast.'"
+    )
+
+    if "ps_history_df" not in st.session_state:
+        month_indices, seasons, values = PS_historical_series()
+        st.session_state["ps_history_df"] = demand_history_to_df(month_indices, seasons, values)
+
+    st.subheader("Historical monthly demand")
+    st.caption("month_index: sequential (1, 2, 3...). calendar_month: 1=Jan..12=Dec.")
+    history_df = st.data_editor(st.session_state["ps_history_df"], num_rows="dynamic", key="ps_history_editor")
+    st.session_state["ps_history_df"] = history_df
+
+    col1, col2 = st.columns(2)
+    target_month_index = col1.number_input("Target month index (to forecast)", min_value=1, value=PS_TARGET_MONTH_INDEX)
+    target_season = col2.number_input("Target calendar month (1-12)", min_value=1, max_value=12, value=PS_TARGET_SEASON)
+
+    st.subheader("Costs and constraints")
+    c1, c2, c3 = st.columns(3)
+    starting_inventory = c1.number_input("Starting inventory", min_value=0, value=PS_STARTING_INVENTORY)
+    normal_capacity = c2.number_input("Normal capacity", min_value=1, value=PS_NORMAL_CAPACITY)
+    overtime_capacity = c3.number_input("Overtime capacity (max)", min_value=1, value=PS_OVERTIME_CAPACITY)
+
+    c4, c5, c6 = st.columns(3)
+    overtime_extra_cost = c4.number_input("Overtime extra cost/unit", min_value=0.0, value=float(PS_OVERTIME_EXTRA_COST))
+    stockout_cost = c5.number_input("Stockout cost/unit", min_value=0.0, value=float(PS_STOCKOUT_COST))
+    holding_cost = c6.number_input("Holding cost/unit/month", min_value=0.0, value=float(PS_HOLDING_COST))
+
+    max_ending_inventory = st.number_input("Max ending inventory (soft cap)", min_value=0, value=PS_MAX_ENDING_INVENTORY)
+
+    if st.button("Forecast and recommend production", type="primary"):
+        month_indices = history_df["month_index"].tolist()
+        seasons = history_df["calendar_month"].tolist()
+        values = history_df["demand"].tolist()
+
+        fit = fit_trend_seasonal(month_indices, seasons, values, baseline_season=1)
+        sigma = press_rmse(fit)
+        fc = forecast(fit, target_month_index, target_season, residual_std=sigma)
+        mu = fc["point"]
+
+        st.subheader("Forecast")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Trend/month", f"{trend_per_period(fit):+.1f}")
+        c2.metric("Point forecast", f"{mu:,.0f}")
+        c3.metric("95% interval", f"{fc['lower']:,.0f} - {fc['upper']:,.0f}")
+        st.caption(
+            f"In-sample residual std: {fit.residual_std:.0f}. Using PRESS/LOOCV RMSE instead ({sigma:.0f}) "
+            "since in-sample residuals understate true forecast error when there are few observations "
+            "per seasonal parameter."
+        )
+
+        rec = ProductionRecommendation(
+            mu=mu, sigma=sigma, underage_cost=stockout_cost, overage_cost=holding_cost,
+            starting_inventory=starting_inventory, normal_capacity=normal_capacity,
+            overtime_capacity=overtime_capacity, overtime_extra_cost=overtime_extra_cost,
+            max_ending_inventory=max_ending_inventory,
+        )
+        optimal = rec.recommend()
+
+        st.subheader("Calculation")
+        st.code(rec.explain_calculation())
+
+        st.subheader("Recommendation")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Recommended production", f"{optimal['production']:,.0f}")
+        c2.metric("Expected cost", f"{optimal['expected_total_cost_including_overtime']:,.2f}")
+        c3.metric("P(stockout)", f"{optimal['prob_stockout']:.1%}")
+        if optimal["capacity_binding"]:
+            st.warning("The unconstrained optimum exceeds overtime capacity -- production is capped, and true stockout risk is higher than the newsvendor formula alone suggests.")
+        else:
+            st.success("Recommendation is within normal capacity -- no overtime needed.")
+        if max_ending_inventory:
+            st.caption(f"P(ending inventory > {max_ending_inventory:,}): {optimal['prob_ending_inventory_exceeds_cap']:.4f}")
+
+        st.subheader("Comparison against alternatives")
+        scenarios = {
+            "Conservative (80% of normal capacity)": round(0.8 * normal_capacity - starting_inventory) if 0.8 * normal_capacity > starting_inventory else 0,
+            "At point forecast (zero buffer)": round(max(mu - starting_inventory, 0)),
+            "Recommended": round(optimal["production"]),
+            "Aggressive (full overtime)": round(overtime_capacity),
+        }
+        rows = []
+        for name, production in scenarios.items():
+            r = rec.evaluate(production)
+            rows.append(
+                {
+                    "scenario": name,
+                    "production": production,
+                    "expected cost": r["expected_total_cost_including_overtime"],
+                    "P(stockout)": r["prob_stockout"],
+                }
+            )
+        st.dataframe(
+            pd.DataFrame(rows).style.format({"production": "{:,.0f}", "expected cost": "{:,.2f}", "P(stockout)": "{:.1%}"}),
+            hide_index=True,
+        )
+
+
 st.title("Nuri — Optimization Engine")
 
 problem_type = st.selectbox(
@@ -733,6 +852,7 @@ problem_type = st.selectbox(
         "Workforce scheduling",
         "Factorial DOE (statistics)",
         "Fractional factorial DOE (statistics)",
+        "Production planning (forecast + newsvendor)",
     ],
 )
 
@@ -744,5 +864,7 @@ elif problem_type == "Workforce scheduling":
     run_scheduling_app()
 elif problem_type == "Factorial DOE (statistics)":
     run_doe_app()
-else:
+elif problem_type == "Fractional factorial DOE (statistics)":
     run_fractional_factorial_app()
+else:
+    run_production_planning_app()

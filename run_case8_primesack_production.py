@@ -36,6 +36,10 @@ rec = ProductionRecommendation(
 optimal = rec.recommend()
 
 print()
+print("=== Calculation chain ===")
+print(rec.explain_calculation())
+
+print()
 print("=== Recommendation ===")
 print(f"Critical ratio (Cu/(Cu+Co)): {optimal['critical_ratio']:.1%}")
 print(f"Recommended production: {optimal['production']:,.0f} sacks")

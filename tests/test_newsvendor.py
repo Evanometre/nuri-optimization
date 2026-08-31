@@ -77,6 +77,18 @@ def test_ending_inventory_cap_is_not_at_risk_at_the_recommended_quantity():
     assert result["prob_ending_inventory_exceeds_cap"] < 0.01
 
 
+def test_explain_calculation_exposes_the_percentile_chain():
+    rec = ProductionRecommendation(
+        mu=36_705, sigma=373, underage_cost=95, overage_cost=7.5,
+        starting_inventory=6_500, normal_capacity=48_000, overtime_capacity=55_000,
+        overtime_extra_cost=18, max_ending_inventory=15_000,
+    )
+    text = rec.explain_calculation()
+    assert "92.68%" in text
+    assert "37,247" in text  # the percentile value X
+    assert "30,747" in text  # X - starting inventory = production
+
+
 def test_sticking_with_a_static_plan_is_costly_if_demand_surprises_upward():
     # If true demand turns out 10% higher than forecast, a static production
     # plan sized for the original forecast should look expensive in hindsight
