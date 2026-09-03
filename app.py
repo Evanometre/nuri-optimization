@@ -30,6 +30,10 @@ from cases.case4_capital_allocation import (
     PRODUCTS as CASE4_PRODUCTS,
     RESOURCES as CASE4_RESOURCES,
 )
+from cases.case9_pp_sack_factory import (
+    PRODUCTS as CASE9_PRODUCTS,
+    RESOURCES as CASE9_RESOURCES,
+)
 from cases.case5_restaurant_scheduling import (
     STAFFING_REQUIREMENTS,
     WEEKDAY_HOURLY_WAGE,
@@ -85,6 +89,9 @@ PRODUCT_MIX_EXAMPLES = {
     ),
     "Distributor capital allocation": (
         CASE4_PRODUCTS, CASE4_RESOURCES, "Recommended purchase quantities", "buy",
+    ),
+    "PP sack factory (capacity-constrained)": (
+        CASE9_PRODUCTS, CASE9_RESOURCES, "Recommended production", "produce",
     ),
     "Blank": (
         {"product_a": {"profit": 0, "max_demand": None}}, {"resource_a": 0},
