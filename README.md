@@ -49,6 +49,7 @@ Procurement and pricing are not in the app yet. They run through their
 | `statistics/newsvendor.py` | Critical ratio, expected costs, production recommendation with capacity and overtime |
 | `statistics/factorial_design.py` | 2^k factorial analysis, best combination, confirmation test |
 | `statistics/fractional_factorial.py` | 2^(k-1) fractional factorial, alias map, holdout validation, segment effects |
+| `inventory/` | Working-capital engine for the Meridian case: data-room loader, reconciliation, lost-sales test, ABC/XYZ segmentation, order-up-to policy with Monte Carlo, scenarios, rebalancing, suppliers, freight, network |
 | `education/` | `simplex.py` and `branch_and_bound.py`: step-by-step solvers for teaching; not used for the main solves |
 
 ## Case studies (`cases/`)
@@ -68,10 +69,21 @@ repo root solves it and prints the analysis.
 | `case9_pp_sack_factory` | PP sack factory capacity allocation | LP/ILP |
 | `case10_procurement_optimization` | ~₦600M/yr spend, 6 categories, 12 suppliers | Procurement allocation |
 | `case11_learnbridge_pricing` | EdTech single price vs three tiers | Pricing |
+| `case12_meridian` | Distributor working capital and service (synthetic data room, not committed) | Inventory policy, simulation, rebalancing, suppliers |
 
 Case 6 and 7 data is synthetic, and the module docstrings say so. Case 8
 documents a missing client input (base production cost per sack) in its own
 docstring.
+
+## Meridian case
+
+The data room workbook is not in the repo. Run the whole analysis with:
+
+```bash
+python run_case12_meridian.py path/to/Meridian_Data_Room.xlsx outputs/meridian
+```
+
+It prints each step, writes CSVs, `summary.json` and a model workbook to the output folder (gitignored), and is deterministic. Assumptions that are not in the data are named in `cases/case12_meridian.py`.
 
 ## Tests
 

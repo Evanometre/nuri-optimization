@@ -196,6 +196,44 @@ policy = pd.DataFrame(
 save(policy, "sku_warehouse_policy.csv", index=False)
 print(policy["action"].value_counts().to_string())
 
+# One workbook with every table, plus the assumptions that are not in the data room.
+assumptions = pd.DataFrame(
+    [
+        ("Service levels (cycle service level)", f"A {BASE_CSL['A']:.1%}, B {BASE_CSL['B']:.1%}, C {BASE_CSL['C']:.1%}", "Our choice; A+B cover 94.9% of COGS"),
+        ("Replenishment review", f"every {REVIEW_DAYS} days", "Assumed; current cadence unknown"),
+        ("Supplier lead-time spread", "sd = lead time x (1 - OTIF)", "Assumed; no PO receipt dates in the data room"),
+        ("Lot-size / case-pack buffer", "+5% on order-up-to level (base)", "Assumed; no MOQs in the data room"),
+        ("Carrying cost", f"{HOLDING_RATE:.0%} of inventory value per year", "Assumed: capital ~9% + handling/insurance ~6%"),
+        ("Aged excess liquidation recovery", f"{AGED_LIQUIDATION_RECOVERY:.0%} of cost", "Assumed"),
+        ("Demand", "18-month mean/sd per SKU-warehouse; stockout months raised to non-stockout mean", "No trend in the 18 months (-0.05%/month, p=0.85)"),
+        ("Open purchase orders", "not in data room", "Release timeline ignores stock already on order"),
+        ("Customer dimension", "not in data room", "Strategic-account service cannot be measured directly"),
+        ("OTIF", "not modelled", "Driven by carriers/operations; monitored, not optimised here"),
+        ("Data", "Synthetic case (Toledah Foreign Enterprise Case 002)", "Meridian is fictional"),
+    ],
+    columns=["assumption", "value", "note"],
+)
+try:
+    with pd.ExcelWriter(os.path.join(out_dir, "Meridian_Phase1_Model_Outputs.xlsx"), engine="openpyxl") as xw:
+        assumptions.to_excel(xw, sheet_name="README_Assumptions", index=False)
+        sheets = {
+            "Reconciliation": rec, "Scenarios": scen_table.reset_index(), "Waterfall": wf.to_frame("value").reset_index(),
+            "Release_Timeline": tl.reset_index(), "Excess_by_Cover": ebc.to_frame("value").reset_index(),
+            "Sensitivity": sens.reset_index(), "Service_Frontier": frontier.reset_index(),
+            "Segments_ABC_XYZ": dollars.reset_index(), "Suppliers": st.reset_index(), "Warehouses": wh.reset_index(),
+            "Warehouse_Balance": bal.reset_index(), "Transfer_Moves": moves, "Pooling": pool.reset_index(),
+            "SKU_Warehouse_Policy": policy,
+        }
+        for name, df in sheets.items():
+            df.to_excel(xw, sheet_name=name[:31], index=False)
+            ws = xw.sheets[name[:31]]
+            ws.freeze_panes = "A2"
+            for i, col in enumerate(df.columns, start=1):
+                width = min(max(len(str(col)), *(len(str(v)) for v in df[col].head(50))) + 2, 48) if len(df) else len(str(col)) + 2
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+except ImportError:
+    print("openpyxl not installed: skipped workbook")
+
 with open(os.path.join(out_dir, "summary.json"), "w") as fh:
     json.dump(summary, fh, indent=2, default=float)
 print(f"\nOutputs written to {out_dir}/")
