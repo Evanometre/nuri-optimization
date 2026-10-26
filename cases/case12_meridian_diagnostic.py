@@ -43,3 +43,19 @@ def load_data_room(path=DATA_ROOM):
         ["month", "origin", "destination", "mode", "weight_lb", "cost", "expedite"], axis=1)
     return {"sku": sku, "inventory": inventory, "history": history, "suppliers": suppliers,
             "customers": customers, "freight": freight}
+
+
+# ---- Steps 4-5: policy and rebalancing assumptions (all stated, all sensitivity-tested) ----
+REVIEW_DAYS = 30          # replenishment review period; no ordering-cadence data in the data room
+HOLD_RATE = 0.20          # annual carrying cost (capital + storage + shrink); same default as nuri/procurement.py
+# Service floors by class. The strategic-account floor ("no stockouts on top 12% of accounts")
+# cannot be mapped to SKUs -- the customer master has no order lines -- so A-class SKUs stand in
+# for it. A-class already runs 0 stockout lines in 18 months.
+SERVICE_FLOORS = {"A": 0.995, "B": 0.97}
+NETWORK_FILL_FLOOR = 0.90  # contractual floor; current fill is 91.8%
+TRANSFER_PCT = 0.03        # transfer freight as % of unit cost: SKU weights are NOT in the data room
+SENSITIVITY = {
+    "sigma_source": ["history", "master"],
+    "review_days": [14, 30, 45],
+    "target_fill": [NETWORK_FILL_FLOOR, BASELINE["fill_rate"]],
+}
