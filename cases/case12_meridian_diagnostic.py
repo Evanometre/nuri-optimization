@@ -59,3 +59,9 @@ SENSITIVITY = {
     "review_days": [14, 30, 45],
     "target_fill": [NETWORK_FILL_FLOOR, BASELINE["fill_rate"]],
 }
+
+
+# ---- Steps 6-7: supplier risk and lever comparison ----
+OTIF_TARGET = 0.95       # supplier delivery standard assumed for the improvement scenario
+DISRUPTION_SLIP_DAYS = (14, 30, 60)
+STANDARD_FREIGHT_BENCHMARK_MODES = ("Ground - LTL", "Ground - Parcel")  # what an expedited lb would otherwise cost

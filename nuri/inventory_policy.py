@@ -27,10 +27,12 @@ Z_MAX = 3.5
 
 
 def series_stats(sku, inventory, history, supplier_otif, sigma_source="history",
-                 lead_time_cv_from_otif=True):
+                 lead_time_cv_from_otif=True, supplier_lead_time=None):
     """One row per (warehouse, SKU): daily demand, sigma of daily demand, lead
     time, lead-time sd, current on-hand and aged units.
 
+    supplier_lead_time: optional {supplier: days}; overrides the SKU-master lead time
+                  (the two sources disagree in the Meridian data room).
     sigma_source: 'history' = observed monthly sd per series;
                   'master'  = SKU-master demand CV applied to the series mean
                   (more conservative in this data room: 0.50 vs ~0.29 observed).
@@ -46,6 +48,8 @@ def series_stats(sku, inventory, history, supplier_otif, sigma_source="history",
     sd_m = g.sd_m.fillna(0) if sigma_source == "history" else g.cv * g.mean_m
     g["sd_d"] = sd_m / np.sqrt(365 / 12)
     g["L"] = g.lead_time
+    if supplier_lead_time is not None:  # alternative source: supplier-master average lead time
+        g["L"] = g.supplier.map(supplier_lead_time)
     # late-delivery share scales lead-time spread: an explicit, stated assumption
     g["sd_L"] = g.L * (1 - g.otif.fillna(1)) if lead_time_cv_from_otif else 0.0
 
